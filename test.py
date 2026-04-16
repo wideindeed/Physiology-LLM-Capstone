@@ -7,6 +7,8 @@ import pyttsx3
 import os
 import math
 from datetime import datetime
+import requests
+from auth import LoginWindow, API_URL
 
 # --- 1. CRASH PREVENTION ---
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
@@ -591,24 +593,33 @@ class RecordsPage(ScrollArea):
         detail_widget = QWidget()
         detail_layout = QVBoxLayout(detail_widget)
         detail_layout.setContentsMargins(20, 10, 20, 10)
-        for rep in report['details']:
-            row = QHBoxLayout()
-            lbl_rep = StrongBodyLabel(f"Rep {rep['rep_num']}:")
-            lbl_issue = BodyLabel(f"{rep['issue']}")
-            lbl_score = BodyLabel(f"Score: {rep['score']}%")
-            if rep['score'] < 70:
-                lbl_issue.setStyleSheet("color: #ff4444;")
-            else:
-                lbl_issue.setStyleSheet("color: #00cc66;")
-            row.addWidget(lbl_rep)
-            row.addWidget(lbl_issue)
-            row.addStretch(1)
-            row.addWidget(lbl_score)
-            detail_layout.addLayout(row)
-            line = QFrame()
-            line.setFrameShape(QFrame.HLine)
-            line.setStyleSheet("color: #333;")
-            detail_layout.addWidget(line)
+
+        details = report.get('details', [])
+        if details:
+            for rep in details:
+                row = QHBoxLayout()
+                lbl_rep = StrongBodyLabel(f"Rep {rep['rep_num']}:")
+                lbl_issue = BodyLabel(f"{rep['issue']}")
+                lbl_score = BodyLabel(f"Score: {rep['score']}%")
+                if rep['score'] < 70:
+                    lbl_issue.setStyleSheet("color: #ff4444;")
+                else:
+                    lbl_issue.setStyleSheet("color: #00cc66;")
+                row.addWidget(lbl_rep)
+                row.addWidget(lbl_issue)
+                row.addStretch(1)
+                row.addWidget(lbl_score)
+                detail_layout.addLayout(row)
+                line = QFrame()
+                line.setFrameShape(QFrame.HLine)
+                line.setStyleSheet("color: #333;")
+                detail_layout.addWidget(line)
+        else:
+            # Cloud-loaded records have no per-rep breakdown
+            lbl = BodyLabel("No per-rep breakdown available for this session.")
+            lbl.setStyleSheet("color: #666;")
+            detail_layout.addWidget(lbl)
+
         card.addGroupWidget(detail_widget)
         self.history_layout.insertWidget(0, card)
 
@@ -619,9 +630,10 @@ class RecordsPage(ScrollArea):
 # =============================================================================
 
 class PhysioDashboard(FluentWindow):
-    def __init__(self):
+    def __init__(self, username):
         super().__init__()
-        self.setWindowTitle("Physio-Vision Enterprise")
+        self.current_user = username
+        self.setWindowTitle(f"Physio-Vision Enterprise | User: {self.current_user}")
         self.resize(1200, 800)
         self.worker = VisionWorker()
         self.worker.frame_processed.connect(self.update_video)
@@ -633,6 +645,12 @@ class PhysioDashboard(FluentWindow):
         self.records_interface = RecordsPage()
         self.settings_interface = SettingsPage()
         self.init_navigation()
+        # Delay the network call by 200ms so the UI can safely render first
+        QTimer.singleShot(200, self.fetch_cloud_history)
+
+
+
+
 
     def init_navigation(self):
         self.addSubInterface(self.home_interface, FIF.VIDEO, "Live Analysis")
@@ -723,11 +741,36 @@ class PhysioDashboard(FluentWindow):
         self.lbl_status.setStyleSheet(
             f"color: white; background-color: {color}; font-weight: bold; padding: 8px; border-radius: 4px;")
 
+
     @Slot(dict)
     def on_session_finish(self, report):
+        # 1. Update the local UI history
         self.records_interface.add_record(report)
-        InfoBar.success(title='Session Saved', content="Patient records have been updated.", orient=Qt.Horizontal,
-                        isClosable=True, position=InfoBarPosition.TOP_RIGHT, parent=self)
+
+        # 2. Push to the Raspberry Pi Database!
+        try:
+            payload = {
+                "username": self.current_user,
+                "exercise": "Deep Squat",
+                "reps": report['reps'],
+                "score": report['avg_score'],
+                "pain_level": 0  # We can build a pain popup next!
+            }
+            response = requests.post(f"{API_URL}/log_session", json=payload)
+
+            if response.status_code == 200:
+                InfoBar.success(title='Cloud Sync',
+                                content="Session securely saved to database.",
+                                orient=Qt.Horizontal, isClosable=True,
+                                position=InfoBarPosition.TOP_RIGHT, parent=self)
+            else:
+                InfoBar.warning(title='Sync Failed',
+                                content="Could not save to database.",
+                                parent=self)
+        except requests.exceptions.RequestException:
+            InfoBar.error(title='Network Error',
+                          content="Cannot reach the Raspberry Pi server.",
+                          parent=self)
 
     def toggle_session(self):
         if self.worker.isRunning():
@@ -742,10 +785,62 @@ class PhysioDashboard(FluentWindow):
         self.worker.stop()
         event.accept()
 
+    def fetch_cloud_history(self):
+        try:
+            response = requests.get(f"{API_URL}/get_history/{self.current_user}")
+
+            if response.status_code == 200:
+                data = response.json()
+                cloud_records = data.get("history", [])
+
+                # Reverse so oldest loads first → newest card ends up on top
+                for row in reversed(cloud_records):
+                    report = {
+                        "date": row.get("date", "Unknown"),
+                        "reps": row.get("reps", 0),
+                        "avg_score": row.get("score", 0),
+                        # This prevents the KeyError crash!
+                        "details": []
+                    }
+                    self.records_interface.add_record(report)
+
+        except requests.exceptions.RequestException:
+            print("Could not fetch history from cloud. Booting in offline mode.")
+
 
 if __name__ == '__main__':
+    from PyQt5.QtCore import QTimer  # <--- Add this import here
+
     app = QApplication(sys.argv)
     setTheme(Theme.DARK)
-    w = PhysioDashboard()
-    w.show()
+
+    # 1. Prevent the app from crashing when switching windows
+    app.setQuitOnLastWindowClosed(False)
+
+    login_window = LoginWindow()
+
+
+    def launch_dashboard(username):
+        print(f"Building main dashboard for user: {username}...")
+        global main_app  # Keep dashboard in memory
+        main_app = PhysioDashboard(username)
+        main_app.show()
+
+        # Now that the dashboard is safe and visible, close the login window
+        login_window.close()
+
+        # Restore normal quit behavior
+        app.setQuitOnLastWindowClosed(True)
+
+
+    def trigger_transition(username):
+        # This decouples the signal from the dashboard creation!
+        print("Login successful. Decoupling thread...")
+        QTimer.singleShot(100, lambda: launch_dashboard(username))
+
+
+    # Connect to the decoupler instead of directly to the dashboard builder
+    login_window.login_successful.connect(trigger_transition)
+
+    login_window.show()
     sys.exit(app.exec())
