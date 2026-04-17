@@ -10,6 +10,7 @@ from datetime import datetime
 import requests
 from auth import LoginWindow, API_URL
 
+
 # --- 1. CRASH PREVENTION ---
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
@@ -25,7 +26,9 @@ from qfluentwidgets import (FluentWindow, NavigationItemPosition, TitleLabel,
                             PrimaryPushButton, ProgressBar, BodyLabel, StrongBodyLabel,
                             CardWidget, setTheme, Theme, LineEdit, SwitchButton,
                             InfoBar, InfoBarPosition, ScrollArea,
-                            ExpandGroupSettingCard, DoubleSpinBox, IconWidget, ToolButton)
+                            ExpandGroupSettingCard, DoubleSpinBox, IconWidget, ToolButton,
+                            MessageBoxBase, SubtitleLabel, Slider)
+
 from qfluentwidgets import FluentIcon as FIF
 
 # --- 3. AI IMPORTS ---
@@ -626,6 +629,139 @@ class RecordsPage(ScrollArea):
     # =============================================================================
 
 
+class PainScaleDialog(MessageBoxBase):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.titleLabel = SubtitleLabel('Session Complete', self)
+        self.bodyLabel = BodyLabel('Rate your joint pain during this session (0-10):', self)
+
+        # The Slider
+        self.slider = Slider(Qt.Horizontal, self)
+        self.slider.setRange(0, 10)
+        self.slider.setValue(0)
+
+        # The big number display
+        self.valLabel = TitleLabel('0', self)
+        self.valLabel.setAlignment(Qt.AlignCenter)
+        self.valLabel.setStyleSheet("color: #ffaa00; font-size: 36px;")
+
+        # Add them to the layout
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.addWidget(self.bodyLabel)
+        self.viewLayout.addSpacing(10)
+        self.viewLayout.addWidget(self.slider)
+        self.viewLayout.addWidget(self.valLabel)
+
+        # Update the number when the slider moves
+        self.slider.valueChanged.connect(lambda v: self.valLabel.setText(str(v)))
+
+        # Change the button text
+        self.yesButton.setText('Save Session')
+        self.cancelButton.setText('Discard')
+
+        self.widget.setMinimumWidth(350)
+
+
+class PainScaleDialog(MessageBoxBase):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.titleLabel = SubtitleLabel('Session Complete: Pain Assessment', self)
+
+        # --- The Data Engine ---
+        # Maps slider value -> (Image Filename, Guide Text)
+        self.pain_map = {
+            0: ("01.PNG", "0: No pain. You feel completely normal and relaxed."),
+            1: ("01.PNG", "1: Very mild. Barely noticeable, like a slight stretch."),
+            2: ("23.PNG", "2: Minor pain. A nagging annoyance, but manageable."),
+            3: ("23.PNG", "3: Mild pain. Noticeable distraction during the movement."),
+            4: ("45.PNG", "4: Moderate pain. Starts to actively interfere with your form."),
+            5: ("45.PNG", "5: Distracting pain. Significant discomfort, clear grimacing."),
+            6: ("67.PNG", "6: Severe pain. Limits your ability to finish the rep comfortably."),
+            7: ("67.PNG", "7: Very severe pain. Intense, disabling, and highly distressing."),
+            8: ("89.PNG", "8: Extreme pain. Hard to even stand or support your own weight."),
+            9: ("89.PNG", "9: Unbearable pain. Crying out or wincing heavily."),
+            10: ("10.PNG", "10: Worst pain imaginable. Stop immediately.")
+        }
+
+        # --- Left Column: Visual Guide ---
+        self.image_label = QLabel(self)
+        self.image_label.setFixedSize(160, 160)
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setStyleSheet("background-color: #1e1e1e; border-radius: 8px; border: 1px solid #333;")
+
+        # --- Right Column: Text & Controls ---
+        self.guide_label = BodyLabel(self.pain_map[0][1], self)
+        self.guide_label.setWordWrap(True)
+        self.guide_label.setMinimumHeight(45)
+        self.guide_label.setStyleSheet("color: #b3b3b3;")
+
+        self.slider = Slider(Qt.Horizontal, self)
+        self.slider.setRange(0, 10)
+        self.slider.setValue(0)
+
+        self.valLabel = TitleLabel('0', self)
+        self.valLabel.setAlignment(Qt.AlignCenter)
+
+        # --- Assembly ---
+        content_layout = QHBoxLayout()
+        content_layout.setSpacing(20)
+
+        # Left Container
+        img_layout = QVBoxLayout()
+        img_layout.addWidget(self.image_label)
+        img_layout.addStretch(1)
+
+        # Right Container
+        right_layout = QVBoxLayout()
+        right_layout.addWidget(self.guide_label)
+        right_layout.addSpacing(15)
+        right_layout.addWidget(self.slider)
+        right_layout.addWidget(self.valLabel)
+        right_layout.addStretch(1)
+
+        content_layout.addLayout(img_layout)
+        content_layout.addLayout(right_layout)
+
+        # Add everything to the main window
+        self.viewLayout.addWidget(self.titleLabel)
+        self.viewLayout.addSpacing(15)
+        self.viewLayout.addLayout(content_layout)
+
+        # Connect the slider to the update logic
+        self.slider.valueChanged.connect(self.update_ui)
+
+        # Initialize the graphics
+        self.update_ui(0)
+
+        self.yesButton.setText('Save Session')
+        self.cancelButton.setText('Discard')
+        self.widget.setMinimumWidth(550)  # Make it wide enough to look sleek
+
+    def update_ui(self, val):
+        # 1. Update the big number and its color
+        self.valLabel.setText(str(val))
+        if val <= 3:
+            color = "#00cc66"  # Green
+        elif val <= 6:
+            color = "#ffaa00"  # Orange
+        else:
+            color = "#ff4444"  # Red
+        self.valLabel.setStyleSheet(f"color: {color}; font-size: 54px; font-weight: bold;")
+
+        # 2. Update the descriptive text
+        img_name, text = self.pain_map[val]
+        self.guide_label.setText(text)
+
+        # 3. Safely load the matching image
+        img_path = os.path.join("pain_imgs", "Squat", img_name)
+        if os.path.exists(img_path):
+            pixmap = QPixmap(img_path).scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.image_label.setPixmap(pixmap)
+        else:
+            self.image_label.setText("Image\nNot Found")
+            self.image_label.setStyleSheet("color: red; background-color: #1e1e1e; border-radius: 8px;")
+
+
 #  PART 6: MAIN APP
 # =============================================================================
 
@@ -741,36 +877,44 @@ class PhysioDashboard(FluentWindow):
         self.lbl_status.setStyleSheet(
             f"color: white; background-color: {color}; font-weight: bold; padding: 8px; border-radius: 4px;")
 
-
     @Slot(dict)
     def on_session_finish(self, report):
-        # 1. Update the local UI history
-        self.records_interface.add_record(report)
+        # 1. Pop up the Pain Scale Dialog!
+        dialog = PainScaleDialog(self)
 
-        # 2. Push to the Raspberry Pi Database!
-        try:
-            payload = {
-                "username": self.current_user,
-                "exercise": "Deep Squat",
-                "reps": report['reps'],
-                "score": report['avg_score'],
-                "pain_level": 0  # We can build a pain popup next!
-            }
-            response = requests.post(f"{API_URL}/log_session", json=payload)
+        # If they click "Save Session" (Yes)...
+        if dialog.exec():
+            # Grab the number they picked
+            pain_score = dialog.slider.value()
 
-            if response.status_code == 200:
-                InfoBar.success(title='Cloud Sync',
-                                content="Session securely saved to database.",
-                                orient=Qt.Horizontal, isClosable=True,
-                                position=InfoBarPosition.TOP_RIGHT, parent=self)
-            else:
-                InfoBar.warning(title='Sync Failed',
-                                content="Could not save to database.",
-                                parent=self)
-        except requests.exceptions.RequestException:
-            InfoBar.error(title='Network Error',
-                          content="Cannot reach the Raspberry Pi server.",
-                          parent=self)
+            # Add it to the local UI report
+            report['pain_level'] = pain_score
+            self.records_interface.add_record(report)
+
+            # 2. Push to the Raspberry Pi Database
+            try:
+                payload = {
+                    "username": self.current_user,
+                    "exercise": "Deep Squat",
+                    "reps": report['reps'],
+                    "score": report['avg_score'],
+                    "pain_level": pain_score  # <--- Now sending the real data!
+                }
+                response = requests.post(f"{API_URL}/log_session", json=payload)
+
+                if response.status_code == 200:
+                    InfoBar.success(title='Cloud Sync',
+                                    content="Session securely saved to database.",
+                                    orient=Qt.Horizontal, isClosable=True,
+                                    position=InfoBarPosition.TOP_RIGHT, parent=self)
+                else:
+                    InfoBar.warning(title='Sync Failed',
+                                    content="Could not save to database.",
+                                    parent=self)
+            except requests.exceptions.RequestException:
+                InfoBar.error(title='Network Error',
+                              content="Cannot reach the Raspberry Pi server.",
+                              parent=self)
 
     def toggle_session(self):
         if self.worker.isRunning():
