@@ -1,15 +1,3 @@
-# =============================================================================
-#  auth.py — Physio-Vision Authentication
-#
-#  Splash flow:
-#    1. Launch splash_player.py as a subprocess (plays eye.mp4 via plain cv2)
-#    2. subprocess.run() blocks until the video finishes — no threads, no Qt
-#    3. Login window appears immediately after
-#
-#  Assets:
-#    startup_content/eye.mp4
-#    startup_content/Physiologo.PNG
-# =============================================================================
 
 import sys
 import os
@@ -273,18 +261,25 @@ class LoginWindow(QWidget):
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(12)
-        self.reg_user    = _Input("Choose a username")
-        self.reg_pass    = _Input("Choose a password", password=True)
-        self.reg_confirm = _Input("Confirm password",  password=True)
+
+        # --- NEW: Added Email Field ---
+        self.reg_user = _Input("Choose a username")
+        self.reg_email = _Input("Email address")
+        self.reg_pass = _Input("Choose a password", password=True)
+        self.reg_confirm = _Input("Confirm password", password=True)
+
         btn = _PrimaryBtn("Create Account")
         btn.clicked.connect(self.attempt_register)
+
         note = QLabel("Credentials are stored securely on the Physio server.")
         note.setWordWrap(True)
         note.setAlignment(Qt.AlignCenter)
         note.setStyleSheet(
             f"color: {CLR_TEXT_SEC}; font-size: 11px; background: transparent;"
         )
+
         lay.addWidget(self.reg_user)
+        lay.addWidget(self.reg_email)
         lay.addWidget(self.reg_pass)
         lay.addWidget(self.reg_confirm)
         lay.addSpacing(4)
@@ -312,27 +307,39 @@ class LoginWindow(QWidget):
             InfoBar.error("Network Error", "Could not reach the server.", parent=self)
 
     def attempt_register(self):
-        user    = self.reg_user.text().strip()
-        pw      = self.reg_pass.text().strip()
+        user = self.reg_user.text().strip()
+        email = self.reg_email.text().strip()
+        pw = self.reg_pass.text().strip()
         confirm = self.reg_confirm.text().strip()
-        if not user or not pw:
+
+        # Check if email is empty
+        if not user or not email or not pw:
             InfoBar.error("", "Please fill in all fields.", parent=self)
             return
+
+        # Basic sanity check for email format
+        if "@" not in email or "." not in email:
+            InfoBar.error("", "Please enter a valid email address.", parent=self)
+            return
+
         if pw != confirm:
             InfoBar.error("", "Passwords do not match.", parent=self)
             return
+
         try:
+            # --- NEW: Added 'email' to the JSON payload ---
             resp = requests.post(f"{API_URL}/register",
-                                 json={"username": user, "password": pw})
+                                 json={"username": user, "email": email, "password": pw})
+
             if resp.status_code == 200:
-                InfoBar.success("Account Created", "You can now sign in.", parent=self)
+                InfoBar.success("Verification Sent", "Check your email to activate your account.", parent=self)
                 self._tab_bar._current = 0
                 self._tab_bar._refresh()
                 self._stack.setCurrentIndex(0)
                 self.login_user.setText(user)
             else:
                 InfoBar.error("Registration Failed",
-                              resp.json().get("detail", "Username may be taken."),
+                              resp.json().get("detail", "Username or Email may be taken."),
                               parent=self)
         except requests.exceptions.RequestException:
             InfoBar.error("Network Error", "Could not reach the server.", parent=self)

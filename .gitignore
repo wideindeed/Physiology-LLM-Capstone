@@ -12,6 +12,9 @@ venv/
 .mvn/
 vendor/
 
+#env, no no for public
+.env
+
 # OS Generated Files
 .DS_Store
 Thumbs.db
@@ -33,3 +36,7 @@ __pycache__/
 
 # IDE files (PyCharm)
 .idea/
+
+#server stuff
+physio.db
+__pycache__/

@@ -1,8 +1,4 @@
-# =============================================================================
-#  engine.py — Physio-Vision Core Engine
-#  All AI logic, pose math, state management, and the VisionWorker thread.
-#  No GUI code lives here. Import this from dashboard.py.
-# =============================================================================
+
 
 import cv2
 import time
@@ -194,18 +190,21 @@ def normalize_skeleton_sts_live(frames_list):
     data = data / np.maximum(pelvis_width, 0.0001)
     return data.reshape(1, 88, 66)
 
+
 def extract_prmd_features(lm):
     """Translates MediaPipe's 33 landmarks into UI-PRMD's 22 specific joints."""
-    def pt(i): return [lm[i].x, lm[i].y, lm[i].z]
-    def avg(i, j): return [(lm[i].x + lm[j].x)/2, (lm[i].y + lm[j].y)/2, (lm[i].z + lm[j].z)/2]
 
-    # Mapping exactly to the PRMD skeleton blueprint
+    # FIX: INVERT THE Y-AXIS (MediaPipe is positive-down, PRMD is positive-up)
+    def pt(i): return [lm[i].x, -lm[i].y, lm[i].z]
+
+    def avg(i, j): return [(lm[i].x + lm[j].x) / 2, -(lm[i].y + lm[j].y) / 2, (lm[i].z + lm[j].z) / 2]
+
     prmd = [
-        avg(23, 24), pt(23), avg(11, 12), avg(11, 12), pt(0), pt(0), # Core/Head
-        pt(11), pt(13), pt(15), pt(15), pt(12), pt(14), pt(16), pt(16), # Arms
-        pt(24), pt(26), pt(28), pt(32), pt(23), pt(25), pt(27), pt(31)  # Legs (14-21)
+        avg(23, 24), pt(23), avg(11, 12), avg(11, 12), pt(0), pt(0),
+        pt(11), pt(13), pt(15), pt(15), pt(12), pt(14), pt(16), pt(16),
+        pt(24), pt(26), pt(28), pt(32), pt(23), pt(25), pt(27), pt(31)
     ]
-    return [coord for joint in prmd for coord in joint] # Flatten to 66 values
+    return [coord for joint in prmd for coord in joint]
 
 
 
@@ -466,61 +465,89 @@ class VisionWorker(QThread):
                 elif time.time() - self.sts_timer > 2.0:
                     self.sts_stage = "RECORDING"
                     self.sts_buffer = []
+                    self.hit_bottom = False  # Tracker for the squat depth
 
                     action_text = "SQUAT DOWN" if self.exercise_mode == "squat" else "STAND UP"
                     self.system_status.emit(f"● RECORDING ({action_text})", "#ff4444")
                     speak_async("Begin.")
 
-            # --- PHASE 3: RECORDING FRAMES & DIAGNOSTICS ---
+            # --- PHASE 3: DYNAMIC RECORDING & DIAGNOSTICS ---
             elif self.sts_stage == "RECORDING":
-                # 1. Save frame to buffer
+                # 1. Save inverted frame to buffer
                 self.sts_buffer.append(extract_prmd_features(landmarks_3d))
 
-                # 2. RUN MATH ENGINE IN BACKGROUND (The "Diagnostic Scanner")
+                # 2. Math Engine Diagnostics (Squat Only)
                 if self.exercise_mode == "squat":
-                    # We pass "DOWN" because we are actively in the rep
                     penalty, issues = analyze_form_mechanics_3d(landmarks_3d, "DOWN", knee_angle)
-                    # If math catches a mistake (e.g., "CRITICAL LEAN"), save it to flag later
                     if issues and not hasattr(self, 'current_rep_issues'):
                         self.current_rep_issues = issues[0]
 
-                # 3. Check target lengths
-                target_length = 81 if self.exercise_mode == "squat" else 88
+                    # Stop Condition: They went deep enough, and are now back to standing
+                    if knee_angle < state.PARAM_SQUAT_DEPTH:
+                        self.hit_bottom = True
+                    if getattr(self, 'hit_bottom', False) and is_standing:
+                        self.sts_stage = "INFERENCE"
+                        self.system_status.emit("ANALYZING AI...", "#0099ff")
 
-                if len(self.sts_buffer) == target_length:
-                    self.sts_stage = "INFERENCE"
-                    self.system_status.emit("ANALYZING AI...", "#0099ff")
+                # 3. Math Engine Diagnostics (STS Only)
+                elif self.exercise_mode == "sts":
+                    # Stop Condition: The rep is finished the moment they are fully standing
+                    if is_standing:
+                        self.sts_stage = "INFERENCE"
+                        self.system_status.emit("ANALYZING AI...", "#0099ff")
 
-            # --- PHASE 4: KERAS AI GRADING + MATH FEEDBACK ---
+                # 4. Failsafe Timeout
+                if len(self.sts_buffer) > 200:
+                    self.sts_stage = "WAITING"
+                    self.system_status.emit("TIMEOUT. RESETTING.", "#ffaa00")
+
+            # --- PHASE 4: TIME WARPING & AI GRADING ---
             elif self.sts_stage == "INFERENCE":
                 try:
-                    # 1. Get the official score from Keras
+                    # 1. DYNAMIC TIME WARPING
+                    import cv2
+                    raw_frames = np.array(self.sts_buffer, dtype=np.float32)
+                    target_length = 81 if self.exercise_mode == "squat" else 88
+
+                    # Stretch or squash the movement to exact AI requirements
+                    warped_frames = cv2.resize(raw_frames, (66, target_length), interpolation=cv2.INTER_LINEAR)
+
+                    # 2. KERAS PREDICTION
                     if self.exercise_mode == "squat" and SQUAT_MODEL:
-                        normalized = normalize_skeleton_squat_live(self.sts_buffer)
+                        normalized = normalize_skeleton_squat_live(warped_frames)
                         prediction = SQUAT_MODEL.predict(normalized, verbose=0)[0][0]
                     elif self.exercise_mode == "sts" and STS_MODEL:
-                        normalized = normalize_skeleton_sts_live(self.sts_buffer)
+                        normalized = normalize_skeleton_sts_live(warped_frames)
                         prediction = STS_MODEL.predict(normalized, verbose=0)[0][0]
                     else:
-                        prediction = 0.85  # Fallback if model failed to load
+                        prediction = 0.85  # Fallback
 
                     self.reps += 1
-                    score = int(prediction * 100)
+                    # --- THE MAGICAL MATH: MIN-MAX SCALING ---
+                    # The absolute minimum and maximum scores from the UI-PRMD dataset
+                    raw_min = 0.60
+                    raw_max = 0.96
 
-                    # 2. COMBINE AI SCORE WITH MATH FEEDBACK
+                    # Stretch the prediction to a 0-100 scale
+                    mapped_score = ((prediction - raw_min) / (raw_max - raw_min)) * 100
+
+                    # "Clamp" the score to guarantee it stays between 0 and 100
+                    score = int(max(0, min(100, mapped_score)))
+
+                    # 3. COMBINE FEEDBACK
                     feedback = "Excellent Form"
                     if self.exercise_mode == "squat" and hasattr(self, 'current_rep_issues'):
-                        feedback = self.current_rep_issues  # Use the specific math feedback (e.g., "Chest Up")
-                        del self.current_rep_issues  # Clear it for the next rep
+                        feedback = self.current_rep_issues
+                        del self.current_rep_issues
                     elif score < 80:
                         feedback = "Compensatory Motion Detected"
 
-                    # 3. Log it and update UI
+                    # 4. Log and update UI
                     log_entry = {"rep_num": self.reps, "score": score, "issue": feedback}
                     self.session_log.append(log_entry)
                     self.stats_update.emit({"reps": self.reps, "score": score, "feedback": feedback})
 
-                    # 4. Speak the results!
+                    # 5. Speak the results
                     speak_text = f"Rep {self.reps}."
                     if feedback != "Excellent Form":
                         speak_text += f" {feedback}."
@@ -529,7 +556,6 @@ class VisionWorker(QThread):
                 except Exception as e:
                     print(f"AI Inference Error: {e}")
 
-                # 5. Instantly reset to wait for the next rep
                 self.sts_stage = "WAITING"
                 self.system_status.emit("RESETTING...", "#ffaa00")
 
