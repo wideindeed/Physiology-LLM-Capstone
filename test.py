@@ -1,5 +1,3 @@
-
-
 import os
 
 # Must be set before any AI/GPU library is imported

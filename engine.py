@@ -1,5 +1,3 @@
-
-
 import cv2
 import time
 import threading
@@ -31,8 +29,8 @@ class AppState:
     Both the GUI and the engine read/write this shared object."""
 
     # --- User Biometrics ---
-    USER_HEIGHT_CM: float = 180.0
-    USER_WEIGHT_KG: float = 75.0
+    USER_HEIGHT_CM: float = 174.0
+    USER_WEIGHT_KG: float = 65.0
 
     # --- System Toggles ---
     VOICE_ON: bool = True
@@ -47,6 +45,12 @@ class AppState:
     PARAM_LEAN_WARN: float = 40.0      # Trunk lean degrees → "Chest Up" warning
     PARAM_LEAN_CRIT: float = 55.0      # Trunk lean degrees → critical alert
     PARAM_ROUNDING: float = 18.0       # Max back curvature degrees allowed
+    PARAM_PUSHUP_UP_ANGLE: float = 145.0      # Elbow angle that counts as "up"
+    PARAM_PUSHUP_DOWN_ANGLE: float = 105.0    # Elbow angle that counts as "down"
+    PARAM_PUSHUP_TIMEOUT_FRAMES: int = 300    # Max frames allowed for one rep attempt
+    PARAM_PUSHUP_HIP_DEV_METERS: float = 0.12 # Max hip deviation from body line before warning
+    PARAM_PUSHUP_HIP_DEV_RATIO: float = 0.20  # Max relative hip deviation vs body length
+    PARAM_HEAD_ANGLE: float = 65.0            # Max head-to-torso angle before "Head Down" warning
 
     # --- Session History (in-memory, not persisted) ---
     HISTORY: list = []
@@ -252,6 +256,71 @@ def analyze_form_mechanics_3d(world_landmarks, stage: str, knee_angle: float):
 
     return penalty, feedback
 
+def analyze_pushup_form_3d(world_landmarks, elbow_angle: float):
+    """Check pushup-specific form: hip sag, elbow flare, head drop."""
+    penalty = 0.0
+    feedback = []
+
+    def ext(idx):
+        return np.array([world_landmarks[idx].x,
+                         world_landmarks[idx].y,
+                         world_landmarks[idx].z])
+
+    l_sh,  r_sh  = ext(11), ext(12)
+    l_hip, r_hip = ext(23), ext(24)
+    l_ank, r_ank = ext(27), ext(28)
+    nose         = ext(0)
+
+    mid_sh  = (l_sh  + r_sh)  / 2
+    mid_hip = (l_hip + r_hip) / 2
+    mid_ank = (l_ank + r_ank) / 2
+
+    # --- 1. Hip Sag / Pike check ---
+    # Ideal: shoulders, hips, ankles form a straight line (small deviation)
+    body_vec   = mid_ank - mid_sh
+    hip_offset = mid_hip - mid_sh
+    if np.linalg.norm(body_vec) > 0:
+        t = np.dot(hip_offset, body_vec) / np.dot(body_vec, body_vec)
+        t = np.clip(t, 0.0, 1.0)
+        closest = mid_sh + t * body_vec
+        sag_dist = np.linalg.norm(mid_hip - closest)
+        body_len = np.linalg.norm(body_vec)
+        sag_ratio = sag_dist / max(body_len, 1e-6)
+        # Evaluate sag mostly under load (mid/lower pushup) to reduce top-position noise.
+        if elbow_angle < 140 and (
+            sag_dist > state.PARAM_PUSHUP_HIP_DEV_METERS or
+            sag_ratio > state.PARAM_PUSHUP_HIP_DEV_RATIO
+        ):
+            penalty += 0.25
+            direction = "Hip Sag" if mid_hip[1] > closest[1] else "Hip Pike"
+            feedback.append(direction)
+
+    # --- 2. Head / Neck alignment ---
+    # Compare neck direction to torso "up" to avoid false positives from opposite vectors.
+    neck_vec = nose - mid_sh
+    torso_up_vec = mid_sh - mid_hip
+    if np.linalg.norm(torso_up_vec) > 0:
+        head_angle = float(np.degrees(np.arccos(np.clip(
+            np.dot(neck_vec / (np.linalg.norm(neck_vec) + 1e-6),
+                   torso_up_vec / (np.linalg.norm(torso_up_vec) + 1e-6)), -1, 1))))
+        if elbow_angle < 130 and head_angle > state.PARAM_HEAD_ANGLE:
+            penalty += 0.08
+            feedback.append("Head Down")
+
+    # --- 3. Elbow flare (check at bottom of rep) ---
+    if elbow_angle < 100:
+        l_elb = ext(13)
+        r_elb = ext(14)
+        l_wr  = ext(15)
+        r_wr  = ext(16)
+        # Elbow should track roughly over wrist, not splayed wide
+        l_flare = abs((l_elb - l_sh)[0]) - abs((l_wr - l_sh)[0])
+        r_flare = abs((r_elb - r_sh)[0]) - abs((r_wr - r_sh)[0])
+        if l_flare > 0.07 or r_flare > 0.07:
+            penalty += 0.15
+            feedback.append("Elbow Flare")
+
+    return penalty, feedback
 
 # =============================================================================
 #  PART 3: AUDIO (NON-BLOCKING)
@@ -279,6 +348,12 @@ try:
 except:
     SQUAT_MODEL = None
     print("WARNING: deep_squat_robust.keras not found.")
+
+try:
+    PUSHUP_MODEL = load_model("pushup_robust.keras")
+except:
+    PUSHUP_MODEL = None
+    print("WARNING: pushup_robust.keras not found.")
 
 try:
     STS_MODEL = load_model("sit_to_stand_robust.keras")
@@ -309,6 +384,17 @@ def normalize_skeleton_sts_live(frames_list):
     pelvis_width = np.linalg.norm(left_hip - right_hip, axis=3, keepdims=True)
     data = data / np.maximum(pelvis_width, 0.0001)
     return data.reshape(1, 88, 66)
+
+def normalize_skeleton_pushup_live(frames_list):
+    """Pushup Normalizer: 60 frames, scales by Shoulder Width"""
+    data = np.array(frames_list).reshape(1, 60, 22, 3)
+    root = data[:, :, 0:1, :]
+    data = data - root
+    l_sh = data[:, :, 6:7, :]   # left shoulder in PRMD mapping
+    r_sh = data[:, :, 10:11, :]  # right shoulder
+    shoulder_width = np.linalg.norm(l_sh - r_sh, axis=3, keepdims=True)
+    data = data / np.maximum(shoulder_width, 0.0001)
+    return data.reshape(1, 60, 66)
 
 
 # =============================================================================
@@ -413,7 +499,10 @@ class VisionWorker(QThread):
         # STATE 0: PROFILE CALIBRATION
         # ==========================================
         if self.current_state == self.STATE_CALIB:
-            if not is_profile_view(landmarks_2d):
+            if self.exercise_mode == "pushup":
+                self.current_state = self.STATE_SESSION
+                speak_async("System Ready.")
+            elif not is_profile_view(landmarks_2d):
                 self.system_status.emit("Turn Sideways", "#ff4444")
                 self.calib_data = []
             else:
@@ -437,6 +526,94 @@ class VisionWorker(QThread):
         elif self.current_state == self.STATE_SESSION:
             landmarks_3d = results.pose_world_landmarks.landmark
             knee_angle = calculate_angle_3d(landmarks_3d[23], landmarks_3d[25], landmarks_3d[27])
+
+            if self.exercise_mode == "pushup":
+                left_elbow_angle = calculate_angle_3d(
+                    landmarks_3d[11], landmarks_3d[13], landmarks_3d[15]
+                )
+                right_elbow_angle = calculate_angle_3d(
+                    landmarks_3d[12], landmarks_3d[14], landmarks_3d[16]
+                )
+
+                # Use the smaller angle so one occluded/extended arm does not suppress valid reps.
+                elbow_angle = min(left_elbow_angle, right_elbow_angle)
+                is_up = elbow_angle > state.PARAM_PUSHUP_UP_ANGLE
+                is_down = elbow_angle < state.PARAM_PUSHUP_DOWN_ANGLE
+
+                if self.sts_stage == "WAITING":
+                    if is_up:
+                        self.sts_stage = "HOLDING"
+                        self.sts_timer = time.time()
+                        self.system_status.emit("HOLD PLANK POSITION...", "#ffaa00")
+
+                elif self.sts_stage == "HOLDING":
+                    if not is_up:
+                        self.sts_stage = "WAITING"
+                        self.system_status.emit("GET IN PLANK POSITION", "#ffaa00")
+                    elif time.time() - self.sts_timer > 0.5:
+                        self.sts_stage = "RECORDING"
+                        self.sts_buffer = []
+                        self.hit_bottom = False
+                        self.system_status.emit("● RECORDING (LOWER DOWN)", "#ff4444")
+                        speak_async("Begin.")
+
+                elif self.sts_stage == "RECORDING":
+                    self.sts_buffer.append(extract_prmd_features(landmarks_3d))
+
+                    penalty, issues = analyze_pushup_form_3d(landmarks_3d, elbow_angle)
+                    if issues and not hasattr(self, 'current_rep_issues'):
+                        self.current_rep_issues = issues[0]
+
+                    if is_down:
+                        self.hit_bottom = True
+                    if getattr(self, 'hit_bottom', False) and is_up:
+                        self.sts_stage = "INFERENCE"
+                        self.system_status.emit("ANALYZING AI...", "#0099ff")
+
+                    if len(self.sts_buffer) > state.PARAM_PUSHUP_TIMEOUT_FRAMES:
+                        self.sts_stage = "WAITING"
+                        self.system_status.emit("TIMEOUT. RESETTING.", "#ffaa00")
+
+                elif self.sts_stage == "INFERENCE":
+                    try:
+                        import cv2 as cv2
+                        raw_frames    = np.array(self.sts_buffer, dtype=np.float32)
+                        warped_frames = cv2.resize(raw_frames, (66, 60),
+                                                   interpolation=cv2.INTER_LINEAR)
+                        if PUSHUP_MODEL:
+                            normalized = normalize_skeleton_pushup_live(warped_frames)
+                            prediction = PUSHUP_MODEL.predict(normalized, verbose=0)[0][0]
+                        else:
+                            prediction = 0.85
+
+                        self.reps += 1
+                        raw_min, raw_max = 0.55, 0.95
+                        score = int(max(0, min(100,
+                            ((prediction - raw_min) / (raw_max - raw_min)) * 100)))
+
+                        feedback = "Excellent Form"
+                        if hasattr(self, 'current_rep_issues'):
+                            feedback = self.current_rep_issues
+                            del self.current_rep_issues
+                        elif score < 80:
+                            feedback = "Compensatory Motion Detected"
+
+                        log_entry = {"rep_num": self.reps, "score": score, "issue": feedback}
+                        self.session_log.append(log_entry)
+                        self.stats_update.emit({"reps": self.reps, "score": score, "feedback": feedback})
+
+                        speak_text = f"Rep {self.reps}."
+                        if feedback != "Excellent Form":
+                            speak_text += f" {feedback}."
+                        speak_async(speak_text)
+
+                    except Exception as e:
+                        print(f"Pushup AI Inference Error: {e}")
+
+                    self.sts_stage = "WAITING"
+                    self.system_status.emit("RESETTING...", "#ffaa00")
+
+                return  # Don't fall through to squat/STS logic
 
             # Simple heuristic triggers
             is_standing = knee_angle > 150
