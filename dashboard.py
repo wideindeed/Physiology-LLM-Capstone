@@ -197,6 +197,7 @@ class HubPage(QWidget):
         ("squat",        "Deep Squat",        "Knee & hip mobility analysis",  "🦵", "available"),
         ("sts", "Sit to Stand", "Geriatric fall-risk assessment", "🪑", "available"),
         ("shoulder",     "Shoulder Press",    "Upper limb biomechanics",        "💪", "coming_soon"),
+        ("pushup",  "Pushup",       "Upper body & core stability",  "𓀒", "available"),
         ("balance",      "Balance Test",      "Static postural stability",      "⚖️", "coming_soon"),
         ("hip_flex",     "Hip Flexion",       "ROM measurement & logging",      "🔄", "coming_soon"),
         ("gait",         "Gait Analysis",     "Walking pattern & cadence",      "👣", "coming_soon"),
@@ -438,6 +439,7 @@ class AnalysisPage(QWidget):
         return {
             "squat":    "Deep Squat Analysis",
             "sts": "Sit-to-Stand Analysis",
+            "pushup":   "Pushup Analysis",
             "lunge":    "Lunge Analysis",
             "shoulder": "Shoulder Press Analysis",
         }.get(self.exercise_key, "Exercise Analysis")
@@ -714,11 +716,15 @@ class DeveloperToolsWindow(QWidget):
             row.addWidget(spin)
             layout.addLayout(row)
 
+        layout.addWidget(BodyLabel("— Squat —"))
         add_tuner("Squat Depth (°)",       state.PARAM_SQUAT_DEPTH,  90,  170, "PARAM_SQUAT_DEPTH")
         add_tuner("Stand-Up Threshold (°)", state.PARAM_UP_THRESHOLD, 150, 180, "PARAM_UP_THRESHOLD")
         add_tuner("Lean Warning (°)",       state.PARAM_LEAN_WARN,    10,  80,  "PARAM_LEAN_WARN")
         add_tuner("Lean Critical (°)",      state.PARAM_LEAN_CRIT,    20,  90,  "PARAM_LEAN_CRIT")
         add_tuner("Back Rounding (°)",      state.PARAM_ROUNDING,     5,   45,  "PARAM_ROUNDING")
+
+        layout.addWidget(BodyLabel("— Push-up —"))
+        add_tuner("Head Angle Limit (°)",   state.PARAM_HEAD_ANGLE,   30,  70,  "PARAM_HEAD_ANGLE")
 
         layout.addStretch(1)
         note = BodyLabel("⚡ Changes apply to the next processed frame.")
