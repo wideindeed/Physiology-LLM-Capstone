@@ -11,7 +11,9 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                               QGraphicsOpacityEffect)
 
 from qfluentwidgets import (LineEdit, PrimaryPushButton, PushButton,
-                             InfoBar, setTheme, Theme)
+                             InfoBar, setTheme, Theme, ComboBox,
+                             DoubleSpinBox, CheckBox, MessageBox,
+                             TransparentPushButton, BodyLabel)
 
 # ---------------------------------------------------------------------------
 # API URL
@@ -166,7 +168,8 @@ class LoginWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Physio-Vision  |  Authentication")
-        self.setFixedSize(440, 620)
+        self.setMinimumSize(440, 700)  # Prevents it from getting too small
+        self.resize(500, 800)  # A better starting size for these fields
         self.setStyleSheet(f"background-color: {CLR_BG};")
 
         root = QVBoxLayout(self)
@@ -262,35 +265,97 @@ class LoginWindow(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(12)
 
-        # --- NEW: Added Email Field ---
+        # 1. Core Credentials
         self.reg_user = _Input("Choose a username")
         self.reg_email = _Input("Email address")
         self.reg_pass = _Input("Choose a password", password=True)
-        self.reg_confirm = _Input("Confirm password", password=True)
+
+        # 2. Name Row
+        name_lay = QHBoxLayout()
+        self.reg_first = _Input("First Name")
+        self.reg_last = _Input("Last Name")
+        name_lay.addWidget(self.reg_first, 1)  # The '1' helps them share space equally
+        name_lay.addWidget(self.reg_last, 1)
+        name_lay.setSpacing(10)
+        lay.addLayout(name_lay)
+
+        # 3. Demographics Row
+        demo_lay = QHBoxLayout()
+        self.reg_country = ComboBox()
+        self.reg_country.addItems(["Select Country...", "USA", "UK", "Canada", "Australia", "UAE", "Other"])
+        self.reg_country.setFixedHeight(42)
+
+        self.reg_level = ComboBox()
+        self.reg_level.addItems(["Beginner", "Intermediate", "Advanced"])
+        self.reg_level.setFixedHeight(42)
+
+        demo_lay.addWidget(self.reg_country)
+        demo_lay.addWidget(self.reg_level)
+
+        # 4. Biometrics Row
+        metric_lay = QHBoxLayout()
+        self.reg_height = DoubleSpinBox()
+        self.reg_height.setPrefix("Height: ")
+        self.reg_height.setSuffix(" cm")
+        self.reg_height.setRange(50.0, 250.0)
+        self.reg_height.setValue(170.0)
+        self.reg_height.setFixedHeight(42)
+
+        self.reg_weight = DoubleSpinBox()
+        self.reg_weight.setPrefix("Weight: ")
+        self.reg_weight.setSuffix(" kg")
+        self.reg_weight.setRange(20.0, 300.0)
+        self.reg_weight.setValue(70.0)
+        self.reg_weight.setFixedHeight(42)
+
+        metric_lay.addWidget(self.reg_height)
+        metric_lay.addWidget(self.reg_weight)
+
+        # 5. EULA Checkbox & Link
+        eula_lay = QHBoxLayout()
+        self.eula_checkbox = CheckBox("I accept the", self)
+        self.eula_link = TransparentPushButton("EULA", self)
+        self.eula_link.setStyleSheet("color: #1D7EC2; text-decoration: underline; font-weight: bold;")
+        self.eula_link.clicked.connect(self.show_eula_popup)
+        eula_lay.addWidget(self.eula_checkbox)
+        eula_lay.addWidget(self.eula_link)
+        eula_lay.addStretch(1)
 
         btn = _PrimaryBtn("Create Account")
         btn.clicked.connect(self.attempt_register)
 
-        note = QLabel("Credentials are stored securely on the Physio server.")
-        note.setWordWrap(True)
-        note.setAlignment(Qt.AlignCenter)
-        note.setStyleSheet(
-            f"color: {CLR_TEXT_SEC}; font-size: 11px; background: transparent;"
-        )
-
+        # Add everything to the main layout
         lay.addWidget(self.reg_user)
         lay.addWidget(self.reg_email)
         lay.addWidget(self.reg_pass)
-        lay.addWidget(self.reg_confirm)
+        lay.addLayout(name_lay)
+        lay.addLayout(demo_lay)
+        lay.addLayout(metric_lay)
+        lay.addLayout(eula_lay)
         lay.addSpacing(4)
         lay.addWidget(btn)
-        lay.addSpacing(8)
-        lay.addWidget(note)
+        lay.addStretch(1)
+
         return w
+
+    def show_eula_popup(self):
+        title = "End User License Agreement"
+        content = (
+            "1. Medical Disclaimer: Physio-Vision is not a medical device. "
+            "Always consult a doctor before starting a new exercise regimen.\n\n"
+            "2. Assumption of Risk: We are not responsible for any injuries, "
+            "strains, or spontaneous backflips that occur while using this software.\n\n"
+            "3. Data Privacy: We securely store your biometric data on our servers to "
+            "improve AI tracking accuracy. It will never shared nor sold to any third party."
+        )
+        dialog = MessageBox(title, content, self)
+        dialog.yesButton.setText("I Understand")
+        dialog.cancelButton.hide()
+        dialog.exec_()
 
     def attempt_login(self):
         user = self.login_user.text().strip()
-        pw   = self.login_pass.text().strip()
+        pw = self.login_pass.text().strip()
         if not user or not pw:
             InfoBar.error("", "Please enter both username and password.", parent=self)
             return
@@ -310,26 +375,45 @@ class LoginWindow(QWidget):
         user = self.reg_user.text().strip()
         email = self.reg_email.text().strip()
         pw = self.reg_pass.text().strip()
-        confirm = self.reg_confirm.text().strip()
 
-        # Check if email is empty
-        if not user or not email or not pw:
-            InfoBar.error("", "Please fill in all fields.", parent=self)
+        first_name = self.reg_first.text().strip()
+        last_name = self.reg_last.text().strip()
+        country = self.reg_country.currentText()
+        fitness_level = self.reg_level.currentText()
+        height = self.reg_height.value()
+        weight = self.reg_weight.value()
+
+        if not user or not email or not pw or not first_name or not last_name:
+            InfoBar.error("", "Please fill in all text fields.", parent=self)
             return
 
-        # Basic sanity check for email format
         if "@" not in email or "." not in email:
             InfoBar.error("", "Please enter a valid email address.", parent=self)
             return
 
-        if pw != confirm:
-            InfoBar.error("", "Passwords do not match.", parent=self)
+        if country == "Select Country...":
+            InfoBar.error("", "Please select a country.", parent=self)
             return
 
+        if not self.eula_checkbox.isChecked():
+            InfoBar.error("Action Required", "You must accept the EULA to register.", parent=self)
+            return
+
+        # Prepare payload for the server
+        payload = {
+            "username": user,
+            "email": email,
+            "password": pw,
+            "first_name": first_name,
+            "last_name": last_name,
+            "country": country,
+            "fitness_level": fitness_level,
+            "height_cm": height,
+            "weight_kg": weight
+        }
+
         try:
-            # --- NEW: Added 'email' to the JSON payload ---
-            resp = requests.post(f"{API_URL}/register",
-                                 json={"username": user, "email": email, "password": pw})
+            resp = requests.post(f"{API_URL}/register", json=payload)
 
             if resp.status_code == 200:
                 InfoBar.success("Verification Sent", "Check your email to activate your account.", parent=self)
