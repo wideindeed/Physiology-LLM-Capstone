@@ -442,7 +442,26 @@ class VisionWorker(QThread):
     # Main loop
     # ------------------------------------------------------------------
     def run(self) -> None:
-        self.cap = cv2.VideoCapture(0)
+        # Use CAP_DSHOW on Windows to fix instant-crash / black screen issues
+        if os.name == 'nt':
+            self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        else:
+            self.cap = cv2.VideoCapture(0)
+
+        # ── THE BUG FIX: Check if camera actually opened ──
+        if not self.cap.isOpened():
+            self.system_status.emit("CAMERA ERROR: Not Found or Blocked", "#C93535")
+            self.session_finished.emit({"error": True})  # Tell UI to reset, but skip pain dialog
+            return
+
+        # Test if we can actually read a frame
+        ret, frame = self.cap.read()
+        if not ret:
+            self.system_status.emit("CAMERA ERROR: In use by another app", "#C93535")
+            self.cap.release()
+            self.session_finished.emit({"error": True})  # Tell UI to reset, but skip pain dialog
+            return
+
         self.running = True
         self.current_state = self.STATE_CALIB
         self.reset_session()
@@ -482,10 +501,10 @@ class VisionWorker(QThread):
 
         # Build and emit the final session report
         report = {
-            "date":      self.start_time.strftime("%Y-%m-%d %H:%M") if self.start_time else "Unknown",
-            "reps":      self.reps,
+            "date": self.start_time.strftime("%Y-%m-%d %H:%M") if self.start_time else "Unknown",
+            "reps": self.reps,
             "avg_score": self._calculate_avg_score(),
-            "details":   self.session_log,
+            "details": self.session_log,
         }
         self.session_finished.emit(report)
 

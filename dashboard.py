@@ -829,9 +829,10 @@ class PhysioDashboard(FluentWindow):
     Manages navigation between Hub, Analysis, Records, and Settings."""
     history_loaded = Signal(list)
 
-    def __init__(self, username: str):
+    def __init__(self, username: str, token: str):
         super().__init__()
         self.current_user = username
+        self.token = token
         self.setWindowTitle(f"Physio-Vision  |  {self.current_user}")
         self.resize(1280, 820)
         self.setMinimumSize(1100, 700)
@@ -919,6 +920,16 @@ class PhysioDashboard(FluentWindow):
     @Slot(dict)
     def _on_session_finish(self, report: dict):
         """Session ended → show pain dialog → save locally + to cloud."""
+        # 1. Reset analysis UI instantly so the button doesn't get stuck
+        self.analysis_page.btn_action.setText("▶  START SESSION")
+
+        # ── 2. THE FIX: If there was a camera error, abort before showing the pain dialog! ──
+        if report.get("error"):
+            return
+
+        self.analysis_page.update_status("OFFLINE", CLR_TEXT_SEC)
+
+        # 3. Show pain dialog and save (Original Logic)
         dialog = PainScaleDialog(self)
         if dialog.exec():
             pain_score = dialog.slider.value()
@@ -927,15 +938,21 @@ class PhysioDashboard(FluentWindow):
 
             # Cloud save
             try:
+                # 1. Attach the VIP Badge
+                headers = {"Authorization": f"Bearer {self.token}"}
+
+                # 2. Strict Payload (No username allowed, backend infers it from token)
                 payload = {
-                    "username":  self.current_user,
-                    "exercise":  self.analysis_page.exercise_key,
-                    "reps":      report["reps"],
-                    "score":     report["avg_score"],
+                    "exercise": self.analysis_page.exercise_key,
+                    "reps": report["reps"],
+                    "score": report["avg_score"],
                     "pain_level": pain_score,
                 }
-                resp = requests.post(f"{API_URL}/log_session", json=payload)
-                if resp.status_code == 200:
+
+                resp = requests.post(f"{API_URL}/log_session", json=payload, headers=headers)
+
+                # Fastapi returns 201 for Created, not 200!
+                if resp.status_code in [200, 201]:
                     InfoBar.success(
                         title="Cloud Sync",
                         content="Session saved to database.",
@@ -943,11 +960,9 @@ class PhysioDashboard(FluentWindow):
                         position=InfoBarPosition.TOP_RIGHT, parent=self
                     )
                 else:
-                    InfoBar.warning(title="Sync Failed",
-                                    content="Could not save to database.", parent=self)
+                    InfoBar.warning(title="Sync Failed", content="Could not save to database.", parent=self)
             except requests.exceptions.RequestException:
-                InfoBar.error(title="Network Error",
-                              content="Cannot reach the server.", parent=self)
+                InfoBar.error(title="Network Error", content="Cannot reach the server.", parent=self)
 
         # Reset analysis UI
         self.analysis_page.btn_action.setText("▶  START SESSION")
@@ -960,10 +975,12 @@ class PhysioDashboard(FluentWindow):
     def _fetch_cloud_history(self):
         def _fetch():
             try:
-                resp = requests.get(f"{API_URL}/get_history/{self.current_user}")
+                headers = {"Authorization": f"Bearer {self.token}"}
+
+                resp = requests.get(f"{API_URL}/get_history", headers=headers)
+
                 if resp.status_code == 200:
                     records = resp.json().get("history", [])
-                    # SAFELY emit the data over the bridge to the main thread
                     self.history_loaded.emit(records)
             except requests.exceptions.RequestException:
                 print("[Physio-Vision] Offline mode — could not reach server.")
@@ -1019,17 +1036,18 @@ def run_application():
     login_window = LoginWindow()
     _dashboard_ref = []   # list used as mutable closure cell
 
-    def launch_dashboard(username: str):
+    def launch_dashboard(username: str, token: str):
         print(f"[Physio-Vision] Building dashboard for: {username}")
         setTheme(Theme.DARK)
-        dashboard = PhysioDashboard(username)
-        _dashboard_ref.append(dashboard)   # keep alive
+        dashboard = PhysioDashboard(username, token) # <--- Pass token
+        _dashboard_ref.append(dashboard)
         dashboard.show()
         login_window.close()
         app.setQuitOnLastWindowClosed(True)
 
-    def on_login(username: str):
-        QTimer.singleShot(100, lambda: launch_dashboard(username))
+    def on_login(username: str, token: str):
+
+        QTimer.singleShot(100, lambda: launch_dashboard(username, token))
 
     login_window.login_successful.connect(on_login)
     login_window.show()

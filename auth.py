@@ -208,7 +208,7 @@ class _PrimaryBtn(PrimaryPushButton):
 
 
 class LoginWindow(QWidget):
-    login_successful = pyqtSignal(str)
+    login_successful = pyqtSignal(str,str)
 
     def __init__(self):
         super().__init__()
@@ -383,7 +383,8 @@ class LoginWindow(QWidget):
             resp = requests.post(f"{API_URL}/login", json=payload, headers=headers)
 
             if resp.status_code == 200:
-                self.login_successful.emit(user)
+                token = resp.json().get("access_token", "")
+                self.login_successful.emit(user,token)
             else:
                 # 3. Crash Fix: Safely parse FastAPI lists into a readable string
                 error_detail = resp.json().get("detail", "Invalid credentials.")
@@ -469,8 +470,10 @@ class LoginWindow(QWidget):
         if "access" in params:
             # SCENARIO 1: Existing User (Login Successful)
             username = params.get("username", "User")
+            token = params["access"]
+
             InfoBar.success("Success", f"Logged in as {username} via Google!", parent=self)
-            self.login_successful.emit(username)
+            self.login_successful.emit(username,token)
 
         elif "temp_token" in params:
             # SCENARIO 2: Brand New User (Needs Biometrics)
